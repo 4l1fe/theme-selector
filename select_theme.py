@@ -2,20 +2,12 @@
 from pathlib import Path
 from collections import namedtuple
 from argparse import ArgumentParser
-from tempfile import tempdir
 from collections import UserString, defaultdict
-from dataclasses import dataclass, asdict, field
-from typing import get_args, get_origin
 from functools import partial
 
 import tomlkit
-import dacite
 import attrs
-import cattr
-from devtools import debug
-from cattrs.preconf.tomlkit import TomlkitConverter, make_converter
-from cattrs.gen import make_mapping_structure_fn
-from cattrs.dispatch import StructureHook
+from cattrs.preconf.tomlkit import make_converter
 from prompt_toolkit.application import Application
 from prompt_toolkit.layout.containers import Window, HSplit, VerticalAlign
 from prompt_toolkit.layout.controls import BufferControl, FormattedTextControl
@@ -26,7 +18,6 @@ from prompt_toolkit.key_binding import KeyBindings
 from prompt_toolkit.widgets import Label
 from prompt_toolkit.styles import Style
 from prompt_toolkit.buffer import Buffer
-from prompt_toolkit.shortcuts import print_formatted_text
 
 
 FormattedLine = namedtuple('FormattedLine', ['style', 'string'])
@@ -54,18 +45,14 @@ class LineStringProperties:
     
 @attrs.define
 class SelectorConfig:
-    properties: defaultdict[str, LineStringProperties] = attrs.field(converter=partial(to_defaultdict, LineStringProperties),
-                                                                     default=to_defaultdict(LineStringProperties, {}))
+    properties = attrs.field(converter=partial(to_defaultdict, LineStringProperties),
+                             default=to_defaultdict(LineStringProperties, {}))
 
     @staticmethod
     def load(config_path: Path) -> 'SelectorConfig':
         if not config_path.exists():
             return toml_converter.structure({}, SelectorConfig)
-        
-        # with config_path.open('r') as file:
-        #     data = tomlkit.load(file).unwrap()  
-        # config = SelectorConfig(**data)
-            
+                   
         text = config_path.read_text()
         config = toml_converter.loads(text, SelectorConfig)
         
@@ -74,19 +61,6 @@ class SelectorConfig:
     def dump(self, config_path: Path):
         config_path.write_text(toml_converter.dumps(self))
         
-
-# def is_defaultdict(type) -> bool:
-#     """Is this type a defaultdict?"""
-#     return issubclass(get_origin(type), defaultdict)
-
-
-# def structure_defaultdict_factory(type: type[defaultdict]) -> StructureHook:
-#     value_type = get_args(type)[1]
-#     return make_mapping_structure_fn(type, toml_converter, partial(defaultdict, value_type))
-
-
-# toml_converter.register_structure_hook_factory(is_defaultdict, structure_defaultdict_factory)
-
 
 class FormattedLineString(UserString):
 
@@ -173,7 +147,6 @@ class LineSelector:
         
         return sorted_values
 
-    
     def _create_formatted_lines(self, values, property_lines: dict[LineStringProperties]) -> list[FormattedLine]:
         formatted_lines = []
         for value in values:
@@ -233,7 +206,6 @@ class LineSelector:
                 selected_line = self.found_values[self._selected_idx]
                 pinned = selected_line.string.toggle_pin()
                 
-                print_formatted_text(debug.format(self.config, frame_depth_=6))
                 self.config.properties[selected_line.string.value].pinned = pinned                
                 self.config.dump(self.config_path)
         
@@ -282,10 +254,10 @@ def select(alacritty_themes_path, selector_config_path):
 
     window = HSplit([
                     selector,
-                    Label([(MAROON_STYLE, 'Quit:'), ('', ' Press `Ctrl`+`q` or `c` '),
-                           (MAROON_STYLE, 'Type:'), ('', ' Type text to fuzzy find from the list '),
-                           (MAROON_STYLE, 'Select:'), ('', ' Press `up`, `down` '),
-                           (MAROON_STYLE, 'Pin:'), ('', ' Press `Ctrl` + `p` '),],
+                    Label([(MAROON_STYLE, 'Quit:'), ('', ' Press `Ctrl+q/c` '),
+                           (MAROON_STYLE, 'Type:'), ('', ' Type text to search '),
+                           (MAROON_STYLE, 'Navigate:'), ('', ' Press `up, down, pgup, pgdw, Ctrl+j/k, Ctrl+d/u` '),
+                           (MAROON_STYLE, 'Pin:'), ('', ' Press `Ctrl+p` '),],
                         style='class:label',
                         wrap_lines=False)
                     ],
@@ -328,16 +300,16 @@ def change(alacritty_themes_path, alacritty_config_path, posh_config_path, selec
         write(selected_path, alacritty_themes_path, alacritty_config_path, posh_config_path)
         
         
-def expanded_path(string) -> Path:
+def expanded_path_type(string) -> Path:
     return Path(string).expanduser()
     
     
 if __name__ == '__main__':
     parser = ArgumentParser()
-    parser.add_argument('--alacritty-themes-path', required=True, type=expanded_path)
-    parser.add_argument('--alacritty-config-path', required=True, type=expanded_path)
-    parser.add_argument('--posh-config-path', required=True, type=expanded_path)
-    parser.add_argument('--selector-config-path', type=expanded_path, default='~/.config/selector-config.toml')
+    parser.add_argument('--alacritty-themes-path', required=True, type=expanded_path_type)
+    parser.add_argument('--alacritty-config-path', required=True, type=expanded_path_type)
+    parser.add_argument('--posh-config-path', required=True, type=expanded_path_type)
+    parser.add_argument('--selector-config-path', type=expanded_path_type, default='~/.config/selector-config.toml')
     args = parser.parse_args()
     
     change(args.alacritty_themes_path, args.alacritty_config_path, args.posh_config_path, args.selector_config_path)
