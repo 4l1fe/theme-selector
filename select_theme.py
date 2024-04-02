@@ -8,16 +8,18 @@ from functools import partial
 import tomlkit
 import attrs
 from cattrs.preconf.tomlkit import make_converter
-from prompt_toolkit.application import Application
-from prompt_toolkit.layout.containers import Window, HSplit, VerticalAlign
+from prompt_toolkit.application import Application, get_app
+from prompt_toolkit.layout.containers import Window, HSplit, VerticalAlign, ConditionalContainer
 from prompt_toolkit.layout.controls import BufferControl, FormattedTextControl
 from prompt_toolkit.layout.layout import Layout
 from prompt_toolkit.layout.processors import BeforeInput
-from prompt_toolkit.filters import Condition
+from prompt_toolkit.filters import Condition, has_focus
 from prompt_toolkit.key_binding import KeyBindings
 from prompt_toolkit.widgets import Label
 from prompt_toolkit.styles import Style
 from prompt_toolkit.buffer import Buffer
+from prompt_toolkit.shortcuts import print_formatted_text
+from prompt_toolkit.document import Document
 
 
 FormattedLine = namedtuple('FormattedLine', ['style', 'string'])
@@ -27,12 +29,22 @@ LIGHT_THEME = 'light'
 toml_converter = make_converter()
 
 
+class ApplicationState:
+    toggle = True
+    
+
+is_search = lambda: ApplicationState.toggle
+is_comment = lambda: not ApplicationState.toggle
+search_filter = Condition(is_search)
+comment_filter = Condition(is_comment)
+
+
 def to_defaultdict(default_factory, data):
     obj = defaultdict(default_factory)
-    
+
     for name, properties in data.items():
         obj[name] = default_factory(**properties)
-    
+
     return obj
 
 
@@ -41,8 +53,8 @@ class LineStringProperties:
     pinned: bool = False
     comment: str = ''
     theme_group: str = LIGHT_THEME
-    
-    
+
+
 @attrs.define
 class SelectorConfig:
     properties = attrs.field(converter=partial(to_defaultdict, LineStringProperties),
@@ -52,15 +64,15 @@ class SelectorConfig:
     def load(config_path: Path) -> 'SelectorConfig':
         if not config_path.exists():
             return toml_converter.structure({}, SelectorConfig)
-                   
+
         text = config_path.read_text()
         config = toml_converter.loads(text, SelectorConfig)
-        
+
         return config
-    
+
     def dump(self, config_path: Path):
         config_path.write_text(toml_converter.dumps(self))
-        
+
 
 class FormattedLineString(UserString):
 
@@ -70,98 +82,113 @@ class FormattedLineString(UserString):
         self._pinned = pinned
         self._pin_char = '*'
         self._comment = comment
-        
+
         init_data = self._make_data()
         super().__init__(init_data)
-    
+
     def toggle_pin(self) -> bool:
         self._pinned = not self._pinned
         self._update_data()
-        
+
         return self._pinned
-    
+
     def is_pinned(self) -> bool:
         return self._pinned
-    
+
+    def get_comment(self):
+        return self._comment
+
+    def update_comment(self, text):
+        self._comment = text
+
     def _make_data(self):
         data = self.value
-        
+
         if self._pinned:
             data = self._pin_char + ' ' + data
-            
+
         if self._comment:
             data = data + '   # ' + self._comment
-            
+
         data += '\n'
-        
+
         return data
-    
+
     def _update_data(self):
         self.data = self._make_data()
-        
-        
+
+
 class LineSelector:
-    
+
     def __init__(self, values: list[str], config: SelectorConfig, config_path: Path) -> None:
         self.config = config
         self.config_path = config_path
         self.formatted_values = self._create_formatted_lines(values, config.properties)
         self._selected_idx = 0
-        self._selected_value = None
-        self._fuzzy_text = ''
+        self._selected_line = None
+        self._search_text = ''
         self._create_container()
-        
+
     def get_text_lines(self):
         if not self.found_values:
             return self.found_values
-            
+
         selected_line = self.found_values[self._selected_idx]
-        
+
         copied_values = self.found_values.copy()
         copied_values[self._selected_idx] = FormattedLine(style='[SetCursorPosition]',
                                                           string=selected_line.string)
         copied_values = sorted(copied_values, key=lambda fl: fl.string.is_pinned(), reverse=True)
-        
+
         return copied_values
-    
+
     def get_selected_value(self):
-        return self._selected_value
-    
-    def fuzzy_find(self, buffer: Buffer):
-        self._fuzzy_text = buffer.document.text
-        self._selected_idx = 0
+        if self._selected_line is None:
+            return self._selected_line
         
+        return self._selected_line.string.value
+
+    def get_focus_on(self):
+        if is_search():
+            return self.search_buffer_control
+        elif is_comment():
+            return self.comment_buffer_control
+        
+    def text_find(self, buffer: Buffer):
+        self._search_text = buffer.document.text
+        self._selected_idx = 0
+
     @property
     def values_len(self) -> int:
         return len(self.found_values)
-    
+
     @property
     def found_values(self) -> list[FormattedLine]:
         values = self.formatted_values
-        if len(self._fuzzy_text) > 0:
-            values = [fl for fl in values 
-                    if self._fuzzy_text in fl.string]
-        
+        if len(self._search_text) > 0:
+            values = [fl for fl in values
+                      if self._search_text in fl.string]
+
         sorted_values = sorted(values, key=lambda fl: fl.string.value.lower())
         sorted_values = sorted(sorted_values, key=lambda fl: fl.string.is_pinned(), reverse=True)
-        
+
         return sorted_values
 
     def _create_formatted_lines(self, values, property_lines: dict[LineStringProperties]) -> list[FormattedLine]:
         formatted_lines = []
         for value in values:
             fls = FormattedLineString(value)
-            
+
             if value in property_lines:
                 lproperties: LineStringProperties = property_lines[value]
-                fls = FormattedLineString(value, 
+                fls = FormattedLineString(value,
                                           pinned=lproperties.pinned,
                                           comment=lproperties.comment)
-            
+
             formatted_lines.append(FormattedLine(style='', string=fls))
-        
+
         return formatted_lines
-            
+
     def _create_container(self):
         kb_select = KeyBindings()
         has_values = Condition(lambda: bool(self.found_values)
@@ -175,7 +202,7 @@ class LineSelector:
         @kb_select.add('c-j')
         def kb_down(event):
             self._selected_idx = min(self.values_len - 1, self._selected_idx + 1)
-        
+
         @kb_select.add("pageup")
         @kb_select.add("c-u")
         def _pageup(event):
@@ -196,42 +223,58 @@ class LineSelector:
         @kb_select.add('enter')
         def kb_enter(event):
             if self.found_values:
-                selected_line = self.found_values[self._selected_idx]
-                self._selected_value = selected_line.string.value
+                self._selected_line = self.found_values[self._selected_idx]
                 event.app.exit()
-                
+
         @kb_select.add('c-p')
         def pin_unpin(event):
             if self.found_values:
                 selected_line = self.found_values[self._selected_idx]
                 pinned = selected_line.string.toggle_pin()
-                
-                self.config.properties[selected_line.string.value].pinned = pinned                
+
+                self.config.properties[selected_line.string.value].pinned = pinned
                 self.config.dump(self.config_path)
-        
-        type_buffer = Buffer(name='fuzzyline',
-                             on_text_changed=self.fuzzy_find)
-        type_window = Window(content=BufferControl(
-                                        buffer=type_buffer,
+
+        search_buffer = Buffer(name='searchline',
+                               on_text_changed=self.text_find)
+        self.search_buffer_control = BufferControl(
+                                        buffer=search_buffer,
                                         input_processors=[
                                             BeforeInput([
                                                 (MAROON_STYLE, 'Search:'),
-                                            ]), 
+                                            ]),
                                         ],
-                                        key_bindings=kb_select),
-                             height=1)   
+                                        key_bindings=kb_select)
+        search_window = Window(content=self.search_buffer_control, height=1)
+        search_window = ConditionalContainer(search_window,filter=search_filter)
+        
+        comment_buffer = Buffer(name='commentline')  # ConditionalKeyBindings
+        self.comment_buffer_control = BufferControl(
+                                    buffer=comment_buffer,
+                                    input_processors=[
+                                        BeforeInput([
+                                            (MAROON_STYLE, 'Comment:'),
+                                        ]),
+                                    ])
+        comment_window = Window(content=self.comment_buffer_control, height=1)
+        comment_window = ConditionalContainer(comment_window, filter=comment_filter)
+        
         self.select_window = Window(content=FormattedTextControl(
                                                 text=self.get_text_lines,
                                                 show_cursor=False,),
-                                    cursorline=True)   
-        self.container = HSplit([type_window,
-                                 Window(char=' ', height=1),
-                                 self.select_window])           
+                                    cursorline=True)
+        
+        blank_line_window = Window(char=' ', height=1)
+
+        self.container = HSplit([search_window,
+                                 comment_window,
+                                 blank_line_window,
+                                 self.select_window])
 
     def __pt_container__(self):
         return self.container
-        
-        
+
+
 style = Style([
     ('label', 'bg:ansiwhite fg:black'),
     ('cursor-line', MAROON_STYLE + ' nounderline'),
@@ -240,7 +283,7 @@ style = Style([
 
 def select(alacritty_themes_path, selector_config_path):
     kb_app = KeyBindings()
-    
+
     @kb_app.add('c-q')
     @kb_app.add('c-c')
     def exit_(event):
@@ -248,18 +291,37 @@ def select(alacritty_themes_path, selector_config_path):
         
     theme_paths = list(alacritty_themes_path.iterdir())
     theme_names = [path.name for path in theme_paths]
-    
+
     config = SelectorConfig.load(selector_config_path)
     selector = LineSelector(theme_names, config, selector_config_path)
 
+    @kb_app.add('c-l')
+    def switch(event):
+        ApplicationState.toggle = not ApplicationState.toggle
+        buffc = selector.get_focus_on()
+        get_app().layout.focus(buffc)
+        
     window = HSplit([
                     selector,
-                    Label([(MAROON_STYLE, 'Quit:'), ('', ' Press `Ctrl+q/c` '),
-                           (MAROON_STYLE, 'Type:'), ('', ' Type text to search '),
-                           (MAROON_STYLE, 'Navigate:'), ('', ' Press `up, down, pgup, pgdw, Ctrl+j/k, Ctrl+d/u` '),
-                           (MAROON_STYLE, 'Pin:'), ('', ' Press `Ctrl+p` '),],
+                    ConditionalContainer(
+                        Label([
+                           (MAROON_STYLE, 'Search:'), ('', ' Type text to search '),
+                           (MAROON_STYLE, 'Navigate:'), ('', ' up, down, pgup, pgdw, Ctrl+j/k, Ctrl+d/u '),
+                           (MAROON_STYLE, 'Pin:'), ('', ' Ctrl+p '),
+                           (MAROON_STYLE, 'Quit:'), ('', ' Ctrl+q/c '),],
                         style='class:label',
-                        wrap_lines=False)
+                        wrap_lines=False),
+                        filter=search_filter,
+                    ),
+                    ConditionalContainer(
+                        Label([
+                           (MAROON_STYLE, 'Comment:'), ('', ' Write a comment to save '),
+                           (MAROON_STYLE, 'Save:'), ('', ' Enter '),
+                           (MAROON_STYLE, 'Quit:'), ('', ' Ctrl+q/c '),],
+                        style='class:label',
+                        wrap_lines=False),
+                        filter=comment_filter,
+                    ),
                     ],
                     align=VerticalAlign.JUSTIFY)
 
@@ -272,10 +334,10 @@ def select(alacritty_themes_path, selector_config_path):
         style=style
     )
     app.run()
-    
+
     selected_config_name = selector.get_selected_value()
     return selected_config_name
-    
+
 
 def write(selected_config_name, alacritty_themes_path, alacritty_config_path, posh_config_path):
     selected_theme_path = alacritty_themes_path / selected_config_name
@@ -283,27 +345,27 @@ def write(selected_config_name, alacritty_themes_path, alacritty_config_path, po
     with open(alacritty_config_path, 'r') as file_a, open(posh_config_path, 'r') as file_p:
         document_a = tomlkit.load(file_a)
         document_p = tomlkit.load(file_p)
-    
+
     # 'import' 0 - theme file path
     document_a['import'][0] = selected_theme_path.as_posix()
     # change OhMyPosh theme correspondingly
     document_p['palettes']['template'] = 'latte' if 'light' in selected_config_name else 'frappe'
-    
+
     with open(alacritty_config_path, 'w') as file_a, open(posh_config_path, 'w') as file_p:
         tomlkit.dump(document_a, file_a)
         tomlkit.dump(document_p, file_p)
 
-    
+
 def change(alacritty_themes_path, alacritty_config_path, posh_config_path, selector_config_path):
     selected_path = select(alacritty_themes_path, selector_config_path)
     if selected_path:
         write(selected_path, alacritty_themes_path, alacritty_config_path, posh_config_path)
-        
-        
+
+
 def expanded_path_type(string) -> Path:
     return Path(string).expanduser()
-    
-    
+
+
 if __name__ == '__main__':
     parser = ArgumentParser()
     parser.add_argument('--alacritty-themes-path', required=True, type=expanded_path_type)
@@ -311,5 +373,5 @@ if __name__ == '__main__':
     parser.add_argument('--posh-config-path', required=True, type=expanded_path_type)
     parser.add_argument('--selector-config-path', type=expanded_path_type, default='~/.config/selector-config.toml')
     args = parser.parse_args()
-    
+
     change(args.alacritty_themes_path, args.alacritty_config_path, args.posh_config_path, args.selector_config_path)
