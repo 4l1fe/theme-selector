@@ -3,6 +3,7 @@ from pathlib import Path
 from argparse import ArgumentParser
 from collections import UserString, defaultdict
 from functools import partial
+from enum import StrEnum, auto
 
 import tomlkit
 import attrs
@@ -59,6 +60,12 @@ def to_defaultdict(default_factory, data):
     return obj
 
 
+class ThemeModeEnum(StrEnum):
+    dark = auto()
+    light = auto()
+    unset = auto()
+    
+
 @attrs.define
 class LineStringProperties:
     """Object that expose every single line properties in the config.
@@ -66,16 +73,21 @@ class LineStringProperties:
     
     pinned: bool = False
     comment: str = ''
-    theme_group: str = LIGHT_THEME
+    theme_mode: ThemeModeEnum = attrs.field(default=ThemeModeEnum.unset,
+                                            converter=lambda value: ThemeModeEnum(value), 
+                                            )
+    
+    def is_theme_set(self):
+        self.theme_mode != ThemeModeEnum.unset
 
 
 @attrs.define
 class SelectorConfig:
     """Model to read and write line properties to. Automatically construct a hierarchical structure"""
     
-    properties = attrs.field(converter=partial(to_defaultdict, LineStringProperties),
-                             default=to_defaultdict(LineStringProperties, {}))
-
+    properties = attrs.field(default=to_defaultdict(LineStringProperties, {}),
+                             converter=partial(to_defaultdict, LineStringProperties))
+    
     @staticmethod
     def load(config_path: Path) -> 'SelectorConfig':
         if not config_path.exists():
@@ -93,43 +105,97 @@ class SelectorConfig:
 class FormattedLineString(UserString):
     """The wrapper of the builtin string type. Mostly needed to display customization"""
     
-    def __init__(self, value: str, pinned: bool = False, comment: str = ''):
+    _theme_char = {ThemeModeEnum.dark: 'D',
+                   ThemeModeEnum.light: 'L'}
+    
+    def __init__(self, value: str,
+                 properties: LineStringProperties = LineStringProperties()):
+                #  pinned: bool = False,
+                #  comment: str = '',
+                #  theme_mode: ThemeModeEnum = ThemeModeEnum.unset):
+        
+        # self.value = value
+        # # self._init_value = value
+        # self._pinned = pinned
+        # self._pin_char = '*'
+        # self._comment = comment
+        
         self.value = value
         # self._init_value = value
-        self._pinned = pinned
+        self.props = properties
         self._pin_char = '*'
-        self._comment = comment
+        # self._theme_char = 'D'
+        # self._light_char = 'L'
+        # self._pinned = properties.pinned
+        # self._comment = properties.comment
+        # self._theme_mode = properties.theme_mode
 
         super().__init__(self._make_formatted_value())
 
-    def toggle_pin(self) -> bool:
-        self._pinned = not self._pinned
-        self._update_data()
+    # def toggle_pin(self) -> bool:
+    #     self._pinned = not self._pinned
+    #     self._update_data()
 
-        return self._pinned
+    #     return self._pinned
+
+    # def is_pinned(self) -> bool:
+    #     return self._pinned
+
+    # def get_comment(self):
+    #     return self._comment
+    
+    # def update_comment(self, text):
+    #     self._comment = text
+    #     self._update_data()
+        
+    # def _make_formatted_value(self):
+    #     data = self.value
+
+    #     if self._pinned:
+    #         data = self._pin_char + ' ' + data
+
+    #     if self._comment:
+    #         data = data + '   # ' + self._comment
+
+    #     data += '\n'
+
+    #     return data
+    
+    def toggle_pin(self) -> bool:
+        self.props.pinned = not self.props.pinned
+        self._update_data()
 
     def is_pinned(self) -> bool:
-        return self._pinned
+        return self.props.pinned
 
     def get_comment(self):
-        return self._comment
-
+        return self.props.comment
+    
     def update_comment(self, text):
-        self._comment = text
+        self.props.comment = text
         self._update_data()
-
+        
     def _make_formatted_value(self):
         data = self.value
 
-        if self._pinned:
+        if self.props.pinned:
             data = self._pin_char + ' ' + data
+            
+        if self.props.theme_mode != ThemeModeEnum.unset:
+            data = self._theme_char[self.props.theme_mode] + ' ' + data
 
-        if self._comment:
-            data = data + '   # ' + self._comment
+        if self.props.comment:
+            data = data + '   # ' + self.props.comment
 
         data += '\n'
 
         return data
+
+    def switch_theme(self):
+        pass
+        
+    def get_props(self) -> LineStringProperties:
+        return self.props
 
     def _update_data(self):
         self.data = self._make_formatted_value()
@@ -224,8 +290,9 @@ class LineStringSelector:
     def selected_line(self) -> FormattedLine | None:
         if self.found_lines:
             return self.found_lines[self._selected_idx]
-            
-    def _create_formatted_lines(self, theme_names, theme_props: dict[LineStringProperties]) -> list[FormattedLine]:
+    
+    @staticmethod            
+    def _create_formatted_lines(theme_names, theme_props: dict[LineStringProperties]) -> list[FormattedLine]:
         formatted_lines = []
         for theme_name in theme_names:
             fl_string = FormattedLineString(theme_name)
@@ -233,8 +300,9 @@ class LineStringSelector:
             if theme_name in theme_props:
                 props: LineStringProperties = theme_props[theme_name]
                 fl_string = FormattedLineString(theme_name,
-                                                pinned=props.pinned,
-                                                comment=props.comment)
+                                                properties=props)
+                                                # pinned=props.pinned,
+                                                # comment=props.comment)
 
             formatted_lines.append(FormattedLine(style='', string=fl_string))
 
@@ -287,6 +355,12 @@ class LineStringSelector:
         def switch_comment(event):
             self.comment_buffer_control.buffer.set_document(Document(self.selected_line.string.get_comment()))
             self.switch_focus()
+            
+        @kb_select.add('c-t', filter=has_selected_line)
+        def set_theme_mode(event):
+            # MUST BE set before toggling
+            pinned = self.selected_line.string.switch_theme()
+            self.sync_props(self.selected_line.string.value, pinned=pinned)
             
         kb_comment = KeyBindings()
 
