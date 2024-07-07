@@ -128,16 +128,18 @@ class FormattedLineString(UserString):
                  properties: LineStringProperties = LineStringProperties()):
         self.value = value
         self.props = properties
+        self.pinned = properties.pinned
 
         super().__init__(self._make_formatted_value())
     
     def toggle_pin(self) -> bool:
-        self.props.pinned = not self.props.pinned
+        # self.props.pinned = not self.props.pinned
+        self.pinned = not self.pinned
         self._update_data()
-        return self.props.pinned
+        return self.pinned
 
     def is_pinned(self) -> bool:
-        return self.props.pinned or False
+        return self.pinned
 
     def get_comment(self):
         return self.props.comment
@@ -149,7 +151,8 @@ class FormattedLineString(UserString):
     def _make_formatted_value(self):
         data = self.value
 
-        if self.props.pinned:
+        # if self.props.pinned:
+        if self.pinned:
             data = self._pin_char + ' ' + data
             
         theme_char = self._theme_char[self.props.theme_mode] if self.props.is_theme_set() else ' '
@@ -235,10 +238,10 @@ class LineStringSelector:
     def sync_props(self, props_idx,  **props):
         """Only selected line is being updated"""
         for prop_name, prop_value in props.items():
-            setattr(self.config.properties[props_idx], prop_name, prop_value) 
+            setattr(self.config.properties[props_idx], prop_name, prop_value)
 
         self.config.dump(self.config_path)
-    
+
     def has_selected_line(self):
         return bool(self.selected_line)
     
@@ -319,11 +322,9 @@ class LineStringSelector:
 
         @kb_select.add('c-p', filter=has_selected_line)
         def pin_unpin(event):
-            props_idx = self.selected_line.string.value  # MUST BE set before toggling
+            props_idx = self.selected_line.string.value  # MUST BE set before toggling, selected line is changed
             pinned = self.selected_line.string.toggle_pin()
             self.sync_props(props_idx, pinned=pinned)
-            # pinned = self.selected_line.string.toggle_pin()
-            # self.sync_props(self.selected_line.string.value, pinned=pinned)
 
         @kb_select.add('c-l', filter=has_selected_line)
         def switch_comment(event):
